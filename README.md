@@ -8,13 +8,24 @@ Drop-in C# SDK for [CheddaBoards](https://cheddaboards.com) — permanent, serve
 
 [![Website](https://img.shields.io/badge/website-cheddaboards.com-blue)](https://cheddaboards.com)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
-[![Version](https://img.shields.io/badge/version-2.0.0--beta-orange)]()
+[![Version](https://img.shields.io/badge/version-2.2.1--beta-orange)]()
+
+---
+
+## What's new in 2.2
+
+- **Category Scoreboards** — `SubmitScoreToBoard(boardId, score, streak)` writes to one specific board (per-level / per-mode / per-category) without fanning out. See [Scores & Leaderboards](#scores--leaderboards).
+- **⚠️ Breaking:** `OnProfileLoaded` now passes a 5th argument, `playCount`. Update 4-arg handlers to `(nickname, score, streak, achievements, playCount)`.
+- **⚠️ Breaking:** `OnDeviceCodeReceived` now passes a 3rd argument, `qrDataUrl` (a base64 PNG QR code you can display). Update 2-arg handlers to `(code, url, qrDataUrl)`.
+- `debugLogging` now defaults to `false` — set it `true` while developing.
+- `GetNickname()` returns `""` for unnamed anonymous players, so you can show "Guest" instead of a generated placeholder.
 
 ---
 
 ## Features
 
-- **Leaderboards** — All Time, Weekly, Daily, Monthly with automatic archiving
+- **Leaderboards** — All Time, Weekly, Daily, Monthly, and custom-interval, with automatic archiving
+- **Category Scoreboards** — Targeted per-level / per-mode boards; submit to one board by ID
 - **Achievements** — Unlock tracking with batch sync support
 - **Multi-Auth** — Anonymous, Google, Apple, Internet Identity via Device Code flow
 - **Play Sessions** — Server-side time validation for anti-cheat
@@ -84,8 +95,9 @@ cb.LoginAnonymous("PlayerName");
 Uses the Device Code Auth flow (RFC 8628) — works on every platform including consoles, VR, and native builds. No browser pop-ups needed in-game.
 
 ```csharp
-// Player gets a code to enter at cheddaboards.com/link
-cb.OnDeviceCodeReceived += (code, url) =>
+// code/url let the player authorise at cheddaboards.com/link.
+// qrDataUrl is a base64 PNG data URL — display it as a scannable QR, or just show the code.
+cb.OnDeviceCodeReceived += (code, url, qrDataUrl) =>
 {
     codeLabel.text = $"Go to {url}\nEnter code: {code}";
 };
@@ -127,6 +139,20 @@ cb.OnScoreError += (error) => Debug.Log($"Error: {error}");
 cb.SubmitScore(1500, 5); // score, streak
 ```
 
+`SubmitScore` fans the score out to every standard board on your game (all-time, weekly, daily…).
+
+### Submit to a Specific Board (Category Scoreboards)
+
+For per-level, per-mode, or per-category leaderboards, submit to one board by ID. Unlike `SubmitScore`, this writes to that board **only** — it does not fan out to your other boards or touch the player's overall profile total.
+
+```csharp
+cb.OnScoreSubmittedToBoard += (boardId, score, streak) => Debug.Log($"Saved to {boardId}: {score}");
+
+cb.SubmitScoreToBoard("level-14", 1500, 5); // boardId, score, streak
+```
+
+The board must be configured as **targeted** in the dashboard. You can call it several times in a row for different boards (e.g. a per-level board plus a shared `runs` board). Failures come back on `OnScoreError`.
+
 ### Submit Score with Achievements
 
 Achievements sync automatically after the score is confirmed:
@@ -153,8 +179,9 @@ cb.GetDailyLeaderboard();
 cb.GetAlltimeLeaderboard();
 cb.GetMonthlyLeaderboard();
 
-// Or by scoreboard ID
+// Or by scoreboard ID — works for any board, timed or targeted
 cb.GetScoreboard("weekly", 100);
+cb.GetScoreboard("level-14", 100);
 ```
 
 ### Get Player Rank
@@ -214,6 +241,7 @@ cb.OnPlaySessionStarted += (token) => Debug.Log("Session started");
 cb.StartPlaySession();
 
 // Submit score — play session token is attached automatically
+// (applies to both SubmitScore and SubmitScoreToBoard)
 cb.SubmitScore(score, streak);
 
 // End when player quits or pauses
@@ -230,18 +258,19 @@ cb.EndPlaySession();
 | `OnLoginSuccess` | `nickname` | Login completed |
 | `OnLoginFailed` | `error` | Login failed |
 | `OnLogoutSuccess` | — | Logged out |
-| `OnScoreSubmitted` | `score, streak` | Score saved |
+| `OnScoreSubmitted` | `score, streak` | Score saved (fan-out) |
+| `OnScoreSubmittedToBoard` | `boardId, score, streak` | Targeted score saved to one board |
 | `OnScoreError` | `error` | Score submission failed |
 | `OnScoreboardLoaded` | `id, config, entries` | Scoreboard data received |
 | `OnScoreboardRankLoaded` | `id, rank, score, streak, total` | Player rank received |
 | `OnAchievementUnlocked` | `achievementId` | Achievement unlocked |
 | `OnAchievementsLoaded` | `achievements` | Achievement list received |
 | `OnPlaySessionStarted` | `token` | Play session active |
-| `OnDeviceCodeReceived` | `code, url` | Device code ready to display |
+| `OnDeviceCodeReceived` | `code, url, qrDataUrl` | Device code ready to display |
 | `OnDeviceCodeApproved` | `nickname` | Social login completed |
 | `OnDeviceCodeExpired` | — | Code timed out |
 | `OnAccountUpgraded` | `oldProfile, newProfile` | Migration completed |
-| `OnProfileLoaded` | `nickname, score, streak, achievements` | Profile data received |
+| `OnProfileLoaded` | `nickname, score, streak, achievements, playCount` | Profile data received |
 | `OnNicknameChanged` | `nickname` | Nickname updated |
 | `OnArchivesListLoaded` | `scoreboardId, archives` | Archive list received |
 | `OnArchivedScoreboardLoaded` | `archiveId, config, entries` | Archived scoreboard data |
@@ -255,7 +284,7 @@ cb.IsAuthenticated()     // true if logged in
 cb.HasAccount()          // true if logged in with a non-anonymous account
 cb.IsAnonymous()         // true if using anonymous auth
 cb.CanConnect()          // true if API key or session is set
-cb.GetNickname()         // current player nickname
+cb.GetNickname()         // current nickname ("" for unnamed anonymous — show "Guest")
 cb.GetHighScore()        // cached high score
 cb.GetBestStreak()       // cached best streak
 cb.GetPlayCount()        // cached play count
@@ -270,7 +299,7 @@ cb.GetPlayerId()         // persistent device ID
 |----------|---------|-------------|
 | `apiKey` | — | Your CheddaBoards API key |
 | `gameId` | — | Your game ID |
-| `debugLogging` | `true` | Enable verbose console logging |
+| `debugLogging` | `false` | Enable verbose console logging (set `true` while developing) |
 
 The SDK auto-creates a singleton `GameObject` with `DontDestroyOnLoad`. No manual scene setup required.
 
@@ -291,6 +320,7 @@ The SDK is HTTP-only — it works identically everywhere Unity runs:
 ## Links
 
 - **Website**: [cheddaboards.com](https://cheddaboards.com)
+- **Docs**: [Godot SDK repo → /docs](https://github.com/cheddatech/CheddaBoards-Godot/tree/main/docs)
 - **Godot SDK**: [CheddaBoards-Godot](https://github.com/cheddatech/CheddaBoards-Godot)
 - **Company**: [cheddatech.com](https://cheddatech.com)
 - **X**: [@cheddatech](https://x.com/cheddatech)
