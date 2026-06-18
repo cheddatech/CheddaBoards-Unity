@@ -1,4 +1,4 @@
-// CheddaBoards.cs v2.0.0
+// CheddaBoards.cs v2.2.1
 // CheddaBoards integration for Unity
 // https://github.com/cheddatech/CheddaBoards-Unity
 // https://cheddaboards.com
@@ -9,6 +9,32 @@
 //   Player authenticates on their phone at cheddaboards.com/link
 // - Score submissions, play sessions, achievements: all via HTTP API
 //
+// v2.2.1: Added SubmitScoreToBoard(scoreboardId, score, streak) +
+//          OnScoreSubmittedToBoard event for targeted "category" scoreboards
+//          (per-level / per-mode boards). Writes to one board only; does not
+//          fan out or touch the player's profile total. The board must be
+//          configured as targeted in the dashboard.
+// v2.2.0: Brings the Unity SDK to parity with the v2.2.0 Godot release:
+//          * BREAKING: OnProfileLoaded now passes playCount as a 5th argument.
+//            4-arg handlers must add a trailing int playCount parameter.
+//          * BREAKING: OnDeviceCodeReceived now passes qrDataUrl as a 3rd
+//            argument (base64 PNG data URL, or "" if the API returns none).
+//            2-arg handlers must add a trailing string parameter.
+//          * debugLogging now defaults to false. Set CheddaBoards.Instance
+//            .debugLogging = true while developing.
+//          * Device codes and emails are redacted in log output.
+//          * Device-code polling fires an immediate poll on app focus/resume,
+//            and uses real-time waits so it keeps polling while the game is
+//            paused (Time.timeScale = 0).
+//          * Anonymous players with no nickname keep an empty nickname, so UIs
+//            can show "Guest" instead of an auto-generated placeholder.
+//            GetNickname() now also filters Player_dev_* / Player_p_* and
+//            returns "" when unnamed (was: a generated default).
+//          * RefreshProfile() always allows the first call; the cooldown
+//            applies from the second call onward.
+//          * 404 on scoreboard lookups is treated as non-fatal.
+//          * ChangeNickname() can be called with no argument.
+// v2.1.0: device_code qr_data_url support (see OnDeviceCodeReceived above).
 // v2.0.0: HTTP-only SDK. Removed JavaScript bridge / web SDK dependency.
 //          All platforms use the same REST API paths.
 //          Social login via Device Code Auth (works everywhere).
@@ -73,7 +99,7 @@ namespace CheddaTech
         // Social login (Google/Apple via device code):
         //    void Start() {
         //        var cb = CheddaBoards.Instance;
-        //        cb.OnDeviceCodeReceived += (code, url) =>
+        //        cb.OnDeviceCodeReceived += (code, url, qrDataUrl) =>
         //            codeLabel.text = $"Go to {url}\nEnter code: {code}";
         //        cb.OnDeviceCodeApproved += (nick) => Debug.Log("Welcome " + nick);
         //        cb.LoginWithDeviceCode();
@@ -99,13 +125,14 @@ namespace CheddaTech
         public event Action<string> OnAuthError;
 
         // --- Profile ---
-        public event Action<string, int, int, List<object>> OnProfileLoaded;
+        public event Action<string, int, int, List<object>, int> OnProfileLoaded;
         public event Action OnNoProfile;
         public event Action<string> OnNicknameChanged;
         public event Action<string> OnNicknameError;
 
         // --- Scores & Leaderboards (Legacy) ---
         public event Action<int, int> OnScoreSubmitted;
+        public event Action<string, int, int> OnScoreSubmittedToBoard;
         public event Action<string> OnScoreError;
         public event Action<List<object>> OnLeaderboardLoaded;
         public event Action<int, int, int, int> OnPlayerRankLoaded;
@@ -139,7 +166,7 @@ namespace CheddaTech
         public event Action<string> OnAccountUpgradeFailed;
 
         // --- Device Code Auth (Cross-platform login) ---
-        public event Action<string, string> OnDeviceCodeReceived;
+        public event Action<string, string, string> OnDeviceCodeReceived;
         public event Action<string> OnDeviceCodeApproved;
         public event Action OnDeviceCodeExpired;
         public event Action<string> OnDeviceCodeError;
@@ -149,7 +176,7 @@ namespace CheddaTech
         // ============================================================
 
         /// <summary>Set to true to enable verbose logging.</summary>
-        public bool debugLogging = true;
+        public bool debugLogging = false;
 
         /// <summary>HTTP API base URL.</summary>
         public const string API_BASE_URL = "https://api.cheddaboards.com";
@@ -251,7 +278,7 @@ namespace CheddaTech
             _instance = this;
             DontDestroyOnLoad(gameObject);
 
-            Log("Initializing CheddaBoards v2.0.0 (HTTP API Mode)...");
+            Log("Initializing CheddaBoards v2.2.1 (HTTP API Mode)...");
             _initComplete = true;
             StartCoroutine(EmitSdkReadyDeferred());
         }
@@ -307,7 +334,8 @@ namespace CheddaTech
                 Log($"No credentials set - skipping HTTP request to {endpoint}");
                 switch (requestType)
                 {
-                    case "submit_score": OnScoreError?.Invoke("No credentials set"); break;
+                    case "submit_score":
+                    case "submit_score_to_board": OnScoreError?.Invoke("No credentials set"); break;
                     case "player_profile": OnNoProfile?.Invoke(); break;
                     case "leaderboard": OnLeaderboardLoaded?.Invoke(new List<object>()); break;
                     case "player_rank": OnRankError?.Invoke("No credentials set"); break;
@@ -458,6 +486,15 @@ namespace CheddaTech
                     _currentMeta = new Dictionary<string, object>();
                     _httpBusy = false;
                     ProcessNextRequest();
+                    yield break;
+                }
+
+                // 404 on scoreboard lookup - scoreboard not configured for this game (non-fatal)
+                if (responseCode == 404 &&
+                    (_currentEndpoint == "get_scoreboard" || _currentEndpoint == "scoreboard_rank" || _currentEndpoint == "list_scoreboards"))
+                {
+                    Log("Scoreboard not found (404) - may not be configured for this game");
+                    EmitHttpFailure(errorMsg);
                     yield break;
                 }
 
@@ -639,6 +676,16 @@ namespace CheddaTech
                     OnScoreSubmitted?.Invoke(_pendingScore, _pendingStreak);
                     FlushDeferredAchievements();
                     break;
+
+                case "submit_score_to_board":
+                {
+                    string sbId = GetMetaString("scoreboard_id");
+                    int sbScore = SafeInt(_currentMeta.ContainsKey("score") ? _currentMeta["score"] : 0);
+                    int sbStreak = SafeInt(_currentMeta.ContainsKey("streak") ? _currentMeta["streak"] : 0);
+                    Log($"Targeted submit to '{sbId}' successful: {sbScore} points, {sbStreak} streak");
+                    OnScoreSubmittedToBoard?.Invoke(sbId, sbScore, sbStreak);
+                    break;
+                }
 
                 case "leaderboard":
                     var entries = GetList(data, "leaderboard");
@@ -865,14 +912,15 @@ namespace CheddaTech
                     string urlComplete = GetString(data, "verification_url_complete", "");
                     int expiresIn = SafeInt(data.ContainsKey("expires_in") ? data["expires_in"] : 300);
                     int interval = SafeInt(data.ContainsKey("interval") ? data["interval"] : 5);
+                    string qrDataUrl = GetString(data, "qr_data_url", "");
 
                     _deviceCode = dc;
                     _deviceUserCode = uc;
                     _deviceCodePollInterval = interval;
                     _deviceCodeExpiresAt = GetUnixTime() + expiresIn;
 
-                    Log($"Device code received: {uc} (expires in {expiresIn}s)");
-                    OnDeviceCodeReceived?.Invoke(uc, !string.IsNullOrEmpty(urlComplete) ? urlComplete : urlVal);
+                    Log($"Device code received: {RedactCode(uc)} (expires in {expiresIn}s)");
+                    OnDeviceCodeReceived?.Invoke(uc, !string.IsNullOrEmpty(urlComplete) ? urlComplete : urlVal, qrDataUrl);
                     StartDeviceCodePolling();
                     break;
                 }
@@ -893,6 +941,10 @@ namespace CheddaTech
             {
                 case "submit_score":
                     _isSubmittingScore = false;
+                    OnScoreError?.Invoke(error);
+                    break;
+                case "submit_score_to_board":
+                    Log($"Targeted submit to '{GetMetaString("scoreboard_id")}' failed: {error}");
                     OnScoreError?.Invoke(error);
                     break;
                 case "leaderboard":
@@ -1045,7 +1097,7 @@ namespace CheddaTech
             }
 
             _nickname = nickname;
-            OnProfileLoaded?.Invoke(nickname, score, streak, achievements);
+            OnProfileLoaded?.Invoke(nickname, score, streak, achievements, playCount);
         }
 
         // ============================================================
@@ -1056,6 +1108,26 @@ namespace CheddaTech
         {
             if (debugLogging)
                 Debug.Log($"[CheddaBoards] {message}");
+        }
+
+        // Redact a user-facing device code for logging. Shows the first 3 chars so
+        // a developer can still correlate logs with what's on screen, without
+        // revealing the full code an attacker would brute-force during approval.
+        private string RedactCode(string code)
+        {
+            if (string.IsNullOrEmpty(code) || code.Length <= 3) return "***";
+            return code.Substring(0, 3) + "***";
+        }
+
+        // Redact an email for logging. Keeps the first character of the local part
+        // and the full domain so developers can tell which user without exposing
+        // the full address.
+        private string RedactEmail(string email)
+        {
+            if (string.IsNullOrEmpty(email)) return "(none)";
+            int at = email.IndexOf('@');
+            if (at <= 1) return at > 0 ? "***" + email.Substring(at) : "***";
+            return email.Substring(0, 1) + "***" + email.Substring(at);
         }
 
         // ============================================================
@@ -1091,20 +1163,20 @@ namespace CheddaTech
 
         public string GetNickname()
         {
-            if (!string.IsNullOrEmpty(_nickname) && !_nickname.StartsWith("Player_p_"))
+            if (!string.IsNullOrEmpty(_nickname)
+                && !_nickname.StartsWith("Player_p_") && !_nickname.StartsWith("Player_dev_"))
                 return _nickname;
 
             if (_cachedProfile.Count > 0)
             {
                 string profileNick = GetString(_cachedProfile, "nickname", "");
-                if (!string.IsNullOrEmpty(profileNick) && !profileNick.StartsWith("Player_p_"))
+                if (!string.IsNullOrEmpty(profileNick)
+                    && !profileNick.StartsWith("Player_p_") && !profileNick.StartsWith("Player_dev_"))
                     return profileNick;
             }
 
-            if (!string.IsNullOrEmpty(_nickname))
-                return _nickname;
-
-            return GetDefaultNickname();
+            // Return empty — callers should show "Guest" for unnamed anonymous players.
+            return "";
         }
 
         public int GetHighScore()
@@ -1248,7 +1320,9 @@ namespace CheddaTech
                 return;
             }
 
-            _nickname = !string.IsNullOrEmpty(nickname) ? nickname : GetDefaultNickname();
+            // Only store a nickname if one was explicitly provided. Do NOT
+            // auto-generate a placeholder — the UI shows "Guest" instead.
+            _nickname = !string.IsNullOrEmpty(nickname) ? nickname : "";
             _authType = "anonymous";
             OnLoginSuccess?.Invoke(_nickname);
             Log($"Anonymous login: {_nickname} (player: {GetPlayerId()})");
@@ -1304,7 +1378,8 @@ namespace CheddaTech
             if (_isRefreshingProfile) return;
 
             float currentTime = Time.time;
-            if (currentTime - _lastProfileRefresh < PROFILE_REFRESH_COOLDOWN) return;
+            // Allow the first-ever call; the cooldown applies from the second call on.
+            if (_lastProfileRefresh > 0f && currentTime - _lastProfileRefresh < PROFILE_REFRESH_COOLDOWN) return;
 
             _isRefreshingProfile = true;
             _lastProfileRefresh = currentTime;
@@ -1312,7 +1387,7 @@ namespace CheddaTech
             Log("Profile refresh requested");
         }
 
-        public void ChangeNickname(string newNickname)
+        public void ChangeNickname(string newNickname = "")
         {
             if (string.IsNullOrEmpty(newNickname) || newNickname.Length < 2)
             {
@@ -1427,7 +1502,7 @@ namespace CheddaTech
         {
             while (_isPollingDeviceCode && !string.IsNullOrEmpty(_deviceCode))
             {
-                yield return new WaitForSeconds(_deviceCodePollInterval);
+                yield return new WaitForSecondsRealtime(_deviceCodePollInterval);
 
                 if (!_isPollingDeviceCode || string.IsNullOrEmpty(_deviceCode))
                     yield break;
@@ -1437,7 +1512,7 @@ namespace CheddaTech
                 // Check expiry
                 if (GetUnixTime() >= _deviceCodeExpiresAt)
                 {
-                    Log($"Device code expired: {_deviceUserCode}");
+                    Log($"Device code expired: {RedactCode(_deviceUserCode)}");
                     StopDeviceCodePolling();
                     _deviceCode = "";
                     _deviceUserCode = "";
@@ -1526,7 +1601,7 @@ namespace CheddaTech
                     string nickname = GetString(data, "nickname", "Player");
                     string email = GetString(data, "email", "");
 
-                    Log($"Device code approved! User: {nickname} ({email})");
+                    Log($"Device code approved! User: {nickname} ({RedactEmail(email)})");
 
                     // Save anonymous player ID BEFORE switching auth — needed for migration
                     string previousAnonymousId = _playerId;
@@ -1557,7 +1632,7 @@ namespace CheddaTech
                     else
                     {
                         _cachedProfile = new Dictionary<string, object> { { "nickname", nickname } };
-                        OnProfileLoaded?.Invoke(nickname, 0, 0, new List<object>());
+                        OnProfileLoaded?.Invoke(nickname, 0, 0, new List<object>(), 0);
                     }
 
                     // Clear device code state
@@ -1705,6 +1780,65 @@ namespace CheddaTech
 
             Log($"Submitting: score={score}, streak={streak}, nickname={nick}, gameId={gameId}, playerId={scoreBody["playerId"]}, session={(_playSessionToken.Length > 20 ? _playSessionToken.Substring(0, 20) : _playSessionToken)}");
             MakeHttpRequest("/scores", "POST", scoreBody, "submit_score");
+        }
+
+        /// <summary>
+        /// Submit a score to ONE specific (targeted) scoreboard, by ID.
+        ///
+        /// Unlike SubmitScore(), this does NOT fan out to your all-time / weekly /
+        /// daily boards and does NOT update the player's overall profile total. It
+        /// writes to the named board only. The board must exist AND be configured
+        /// as a "targeted" board in the dashboard, otherwise the backend returns an
+        /// error.
+        ///
+        /// Use it for per-level, per-mode, or category leaderboards:
+        ///     CheddaBoards.Instance.SubmitScoreToBoard("level-14", score, streak);
+        ///
+        /// If the game has time validation enabled, start a play session first
+        /// (StartPlaySession) exactly as you would for SubmitScore — the active
+        /// play-session token is attached automatically when present.
+        ///
+        /// Fires OnScoreSubmittedToBoard(scoreboardId, score, streak) on success,
+        /// or OnScoreError(reason) on failure. Safe to call several times in a row
+        /// for different boards; each call carries its score / streak / board id in
+        /// request meta rather than the shared _pending* fields, so queued submits
+        /// don't clobber each other.
+        /// </summary>
+        public void SubmitScoreToBoard(string scoreboardId, int score, int streak = 0)
+        {
+            if (!IsAuthenticated())
+            {
+                Log("Not authenticated, cannot submit to board");
+                OnScoreError?.Invoke("Not authenticated");
+                return;
+            }
+
+            if (string.IsNullOrEmpty(scoreboardId))
+            {
+                OnScoreError?.Invoke("scoreboardId is required");
+                return;
+            }
+
+            string nick = !string.IsNullOrEmpty(_nickname) ? _nickname : GetDefaultNickname();
+            var body = new Dictionary<string, object>
+            {
+                { "playerId", GetPlayerId() },
+                { "gameId", gameId },
+                { "score", score },
+                { "streak", streak },
+                { "nickname", nick },
+                { "scoreboardId", scoreboardId }
+            };
+            if (!string.IsNullOrEmpty(_playSessionToken))
+                body["playSessionToken"] = _playSessionToken;
+
+            Log($"Submitting to board '{scoreboardId}': score={score}, streak={streak}, player={body["playerId"]}");
+            MakeHttpRequest("/scores", "POST", body, "submit_score_to_board", new Dictionary<string, object>
+            {
+                { "scoreboard_id", scoreboardId },
+                { "score", score },
+                { "streak", streak }
+            });
         }
 
         // ============================================================
@@ -2014,7 +2148,7 @@ namespace CheddaTech
         {
             Debug.Log("");
             Debug.Log("╔══════════════════════════════════════════════╗");
-            Debug.Log("║        CheddaBoards Debug Status v2.0.0      ║");
+            Debug.Log("║        CheddaBoards Debug Status v2.2.1      ║");
             Debug.Log("╠══════════════════════════════════════════════╣");
             Debug.Log($"║ Configuration                                ║");
             Debug.Log($"║  - Platform:         {Application.platform.ToString().PadRight(24)}║");
@@ -2041,7 +2175,7 @@ namespace CheddaTech
             Debug.Log($"║  - HTTP Busy:        {_httpBusy.ToString().PadRight(24)}║");
             Debug.Log($"║  - Queue Size:       {_requestQueue.Count.ToString().PadRight(24)}║");
             Debug.Log($"║  - Play Session:     {HasPlaySession().ToString().PadRight(24)}║");
-            Debug.Log($"║  - Device Code:      {(!string.IsNullOrEmpty(_deviceUserCode) ? _deviceUserCode : "none").PadRight(24)}║");
+            Debug.Log($"║  - Device Code:      {(!string.IsNullOrEmpty(_deviceUserCode) ? RedactCode(_deviceUserCode) : "none").PadRight(24)}║");
             Debug.Log($"║  - DC Polling:       {_isPollingDeviceCode.ToString().PadRight(24)}║");
             Debug.Log("╚══════════════════════════════════════════════╝");
             Debug.Log("");
@@ -2054,6 +2188,26 @@ namespace CheddaTech
         private void OnDestroy()
         {
             StopDeviceCodePolling();
+        }
+
+        // When the app regains focus (e.g. the player comes back after completing
+        // the link flow on their phone), fire one immediate device-code poll so
+        // there's no up-to-interval delay before approval is picked up. Standard
+        // RFC 8628 polling allows out-of-schedule polls.
+        private void OnApplicationFocus(bool hasFocus)
+        {
+            if (!hasFocus || !_isPollingDeviceCode) return;
+            if (_deviceCodePollInFlight || string.IsNullOrEmpty(_deviceCode)) return;
+            Log("App regained focus during device code linking — polling immediately");
+            _deviceCodePollInFlight = true;
+            StartCoroutine(PollDeviceCodeToken());
+        }
+
+        // Mobile resume mirrors focus regain.
+        private void OnApplicationPause(bool paused)
+        {
+            if (!paused)
+                OnApplicationFocus(true);
         }
 
         // ============================================================
