@@ -1,4 +1,4 @@
-// CheddaBoards.cs v2.2.1
+// CheddaBoards.cs v2.2.3
 // CheddaBoards integration for Unity
 // https://github.com/cheddatech/CheddaBoards-Unity
 // https://cheddaboards.com
@@ -9,6 +9,18 @@
 //   Player authenticates on their phone at cheddaboards.com/link
 // - Score submissions, play sessions, achievements: all via HTTP API
 //
+// v2.2.3: Session persistence + the v2.2.4 nickname validation:
+//          * The session token from device code auth is saved to PlayerPrefs
+//            and restored on startup, so logged-in players stay logged in
+//            across app restarts instead of repeating device code auth.
+//          * New OnSessionExpired event: fired when the server rejects the
+//            stored token (401/403). The saved session is cleared and
+//            OnLogoutSuccess also fires so existing menus fall back to
+//            their login screen with no changes.
+//          * Logout() now clears the saved session.
+//          * ChangeNickname() enforces the canonical nickname rule
+//            client-side (3-16 chars, letters/numbers/underscores),
+//            matching proxy and canister validation.
 // v2.2.1: Added SubmitScoreToBoard(scoreboardId, score, streak) +
 //          OnScoreSubmittedToBoard event for targeted "category" scoreboards
 //          (per-level / per-mode boards). Writes to one board only; does not
@@ -122,6 +134,7 @@ namespace CheddaTech
         public event Action<string> OnLoginSuccess;
         public event Action<string> OnLoginFailed;
         public event Action OnLogoutSuccess;
+        public event Action OnSessionExpired;
         public event Action<string> OnAuthError;
 
         // --- Profile ---
@@ -250,6 +263,10 @@ namespace CheddaTech
 
         private const string DEVICE_ID_PREF_KEY = "cheddaboards_device_id";
         private const string DEVICE_ID_CREATED_KEY = "cheddaboards_device_created";
+        private const string SESSION_TOKEN_PREF_KEY = "cheddaboards_session_token";
+        private const string SESSION_NICKNAME_PREF_KEY = "cheddaboards_session_nickname";
+        private const string SESSION_AUTH_TYPE_PREF_KEY = "cheddaboards_session_auth_type";
+        private const string SESSION_SAVED_AT_PREF_KEY = "cheddaboards_session_saved_at";
 
         // ============================================================
         // INTERNAL TYPES
@@ -278,7 +295,8 @@ namespace CheddaTech
             _instance = this;
             DontDestroyOnLoad(gameObject);
 
-            Log("Initializing CheddaBoards v2.2.1 (HTTP API Mode)...");
+            Log("Initializing CheddaBoards v2.2.3 (HTTP API Mode)...");
+            LoadSavedSession();
             _initComplete = true;
             StartCoroutine(EmitSdkReadyDeferred());
         }
@@ -456,6 +474,18 @@ namespace CheddaTech
             if (responseCode != 200)
             {
                 string errorMsg = GetString(response, "error", "Unknown error");
+
+                // Server rejected our session token - expire it so the game
+                // falls back to the login screen instead of erroring forever
+                if ((responseCode == 401 || responseCode == 403) && !string.IsNullOrEmpty(_sessionToken))
+                {
+                    ExpireSession();
+                    EmitHttpFailure(errorMsg);
+                    _currentMeta = new Dictionary<string, object>();
+                    _httpBusy = false;
+                    ProcessNextRequest();
+                    yield break;
+                }
 
                 // 404 on profile lookup is expected for new players
                 if (responseCode == 404 && _currentEndpoint == "player_profile")
@@ -1236,6 +1266,7 @@ namespace CheddaTech
         {
             _sessionToken = token;
             Log("Session token set");
+            SaveSession();
         }
 
         public void SetPlayerId(string playerId)
@@ -1278,6 +1309,64 @@ namespace CheddaTech
         private string LoadDeviceId()
         {
             return PlayerPrefs.GetString(DEVICE_ID_PREF_KEY, "");
+        }
+
+        // ============================================================
+        // SESSION PERSISTENCE (v2.2.3)
+        // ============================================================
+        // The device-code session token is saved so players stay signed
+        // in across restarts. The stored token is validated lazily: it is
+        // restored optimistically and cleared if the server rejects it
+        // (401/403 -> OnSessionExpired).
+
+        private void SaveSession()
+        {
+            if (string.IsNullOrEmpty(_sessionToken))
+                return;
+            PlayerPrefs.SetString(SESSION_TOKEN_PREF_KEY, _sessionToken);
+            PlayerPrefs.SetString(SESSION_NICKNAME_PREF_KEY, _nickname);
+            PlayerPrefs.SetString(SESSION_AUTH_TYPE_PREF_KEY, _authType);
+            PlayerPrefs.SetFloat(SESSION_SAVED_AT_PREF_KEY, (float)GetUnixTime());
+            PlayerPrefs.Save();
+            Log("Session saved to PlayerPrefs");
+        }
+
+        private void LoadSavedSession()
+        {
+            string token = PlayerPrefs.GetString(SESSION_TOKEN_PREF_KEY, "");
+            if (string.IsNullOrEmpty(token))
+                return;
+            _sessionToken = token;
+            _nickname = PlayerPrefs.GetString(SESSION_NICKNAME_PREF_KEY, "");
+            _authType = PlayerPrefs.GetString(SESSION_AUTH_TYPE_PREF_KEY, "google");
+            _cachedProfile = new Dictionary<string, object> { { "nickname", _nickname } };
+            Log($"Restored saved session for {_nickname} (validated on first request)");
+        }
+
+        private void ClearSavedSession()
+        {
+            if (!PlayerPrefs.HasKey(SESSION_TOKEN_PREF_KEY))
+                return;
+            PlayerPrefs.DeleteKey(SESSION_TOKEN_PREF_KEY);
+            PlayerPrefs.DeleteKey(SESSION_NICKNAME_PREF_KEY);
+            PlayerPrefs.DeleteKey(SESSION_AUTH_TYPE_PREF_KEY);
+            PlayerPrefs.DeleteKey(SESSION_SAVED_AT_PREF_KEY);
+            PlayerPrefs.Save();
+            Log("Saved session cleared");
+        }
+
+        private void ExpireSession()
+        {
+            // Server rejected the stored session token - clear everything
+            // and tell the game so it can return to its login screen.
+            Log("Session expired or rejected by server - clearing");
+            _sessionToken = "";
+            _authType = "";
+            _nickname = "";
+            _cachedProfile.Clear();
+            ClearSavedSession();
+            OnSessionExpired?.Invoke();
+            OnLogoutSuccess?.Invoke();
         }
 
         private string SanitizePlayerId(string rawId)
@@ -1359,6 +1448,7 @@ namespace CheddaTech
             _nickname = "";
             _sessionToken = "";
             _playSessionToken = "";
+            ClearSavedSession();
             OnLogoutSuccess?.Invoke();
             Log("Logged out");
         }
@@ -1389,10 +1479,26 @@ namespace CheddaTech
 
         public void ChangeNickname(string newNickname = "")
         {
-            if (string.IsNullOrEmpty(newNickname) || newNickname.Length < 2)
+            // Canonical rule (matches proxy + canister): 3-16 chars, letters/numbers/underscores.
+            if (string.IsNullOrEmpty(newNickname) || newNickname.Length < 3)
             {
-                OnNicknameError?.Invoke("Nickname must be at least 2 characters");
+                OnNicknameError?.Invoke("Nickname must be at least 3 characters");
                 return;
+            }
+            if (newNickname.Length > 16)
+            {
+                OnNicknameError?.Invoke("Nickname must be 16 characters or less");
+                return;
+            }
+            foreach (char c in newNickname)
+            {
+                bool valid = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                             (c >= '0' && c <= '9') || c == '_';
+                if (!valid)
+                {
+                    OnNicknameError?.Invoke("Nickname can only contain letters, numbers, and underscores");
+                    return;
+                }
             }
 
             // Anonymous players who haven't submitted a score yet don't exist on backend
@@ -1611,6 +1717,7 @@ namespace CheddaTech
                     _sessionToken = sessionId;
                     _nickname = nickname;
                     _authType = "google"; // Provider determined by what they chose on the page
+                    SaveSession();
 
                     // Clear stale anonymous play session
                     if (!string.IsNullOrEmpty(_playSessionToken))
