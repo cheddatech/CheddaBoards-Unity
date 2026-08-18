@@ -1,4 +1,8 @@
-# CheddaBoards Unity SDK 🧀
+<p align="center">
+  <img src="docs/cheddaboards_logo.png" alt="CheddaBoards" width="420">
+</p>
+
+# CheddaBoards Unity SDK
 
 > **⚠️ BETA** — This SDK is under active development and testing. The API may change. Feedback welcome via [Issues](https://github.com/cheddatech/CheddaBoards-Unity/issues) or [@cheddatech](https://x.com/cheddatech).
 
@@ -90,6 +94,11 @@ cb.OnLoginFailed += (error) => Debug.Log("Failed: " + error);
 cb.LoginAnonymous("PlayerName");
 ```
 
+> **Nickname rules (server-enforced):** 3–16 characters, letters, numbers, and
+> underscores. Anything else is rejected on nickname changes; names supplied at
+> login are sanitized server-side. If a name is already taken, the server
+> assigns a suffixed variant (e.g. `Player_1`).
+
 ### Social Login (Google / Apple / Internet Identity)
 
 Uses the Device Code Auth flow (RFC 8628) — works on every platform including consoles, VR, and native builds. No browser pop-ups needed in-game.
@@ -115,7 +124,7 @@ cb.LoginWithDeviceCode();
 
 ### Account Migration
 
-Upgrade an anonymous player to a verified account without losing scores or achievements:
+Upgrade an anonymous player to a verified account without losing scores or achievements. Scores and streaks merge by maximum, achievements are deduplicated, and play counts are summed — linking the same account from a second device merges cleanly.
 
 ```csharp
 cb.OnAccountUpgraded += (oldProfile, newProfile) =>
@@ -321,7 +330,9 @@ The SDK is HTTP-only — it works identically everywhere Unity runs:
 
 - **Website**: [cheddaboards.com](https://cheddaboards.com)
 - **Docs**: [Godot SDK repo → /docs](https://github.com/cheddatech/CheddaBoards-Godot/tree/main/docs)
+- **HTTP API reference**: [quickstart-api](https://github.com/cheddatech/CheddaBoards-Godot/blob/main/docs/quickstart-api.md) — the same REST API this SDK wraps
 - **Godot SDK**: [CheddaBoards-Godot](https://github.com/cheddatech/CheddaBoards-Godot)
+- **Backend (open source)**: [cheddaboards](https://github.com/cheddatech/cheddaboards) — the canister this all runs on
 - **Company**: [cheddatech.com](https://cheddatech.com)
 - **X**: [@cheddatech](https://x.com/cheddatech)
 
