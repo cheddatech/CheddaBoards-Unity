@@ -1,28 +1,28 @@
 <p align="center">
-  <img src="docs/cheddaboards_logo.png" alt="CheddaBoards" width="420">
+  <img src="assets/logo.png" alt="CheddaBoards" width="420">
 </p>
 
 # CheddaBoards Unity SDK
-
-> **⚠️ BETA** — This SDK is under active development and testing. The API may change. Feedback welcome via [Issues](https://github.com/cheddatech/CheddaBoards-Unity/issues) or [@cheddatech](https://x.com/cheddatech).
 
 **Leaderboards, achievements, and auth for Unity. Any platform. 3-minute setup.**
 
 Drop-in C# SDK for [CheddaBoards](https://cheddaboards.com) — permanent, serverless gaming infrastructure powered by the Internet Computer.
 
 [![Website](https://img.shields.io/badge/website-cheddaboards.com-blue)](https://cheddaboards.com)
+[![Docs](https://img.shields.io/badge/docs-docs.cheddaboards.com-blue)](https://docs.cheddaboards.com)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
-[![Version](https://img.shields.io/badge/version-2.2.1--beta-orange)]()
+[![Version](https://img.shields.io/badge/version-2.2.6-green)]()
 
 ---
 
-## What's new in 2.2
+## What's new
 
-- **Category Scoreboards** — `SubmitScoreToBoard(boardId, score, streak)` writes to one specific board (per-level / per-mode / per-category) without fanning out. See [Scores & Leaderboards](#scores--leaderboards).
-- **⚠️ Breaking:** `OnProfileLoaded` now passes a 5th argument, `playCount`. Update 4-arg handlers to `(nickname, score, streak, achievements, playCount)`.
-- **⚠️ Breaking:** `OnDeviceCodeReceived` now passes a 3rd argument, `qrDataUrl` (a base64 PNG QR code you can display). Update 2-arg handlers to `(code, url, qrDataUrl)`.
-- `debugLogging` now defaults to `false` — set it `true` while developing.
-- `GetNickname()` returns `""` for unnamed anonymous players, so you can show "Guest" instead of a generated placeholder.
+- **2.2.6** — Board reads now come **straight from the CheddaBoards canister** for faster loads, with automatic proxy fallback (see 2.2.5). Fixed the `GetAlltimeLeaderboard()` / `GetWeeklyLeaderboard()` helpers, which queried the wrong board IDs. `GetLeaderboard()` default limit is now 100.
+- **2.2.5** — Direct canister reads: `GetScoreboard()` and the Weekly / Daily / Alltime / Monthly helpers read directly from the Internet Computer, keyless and CORS-simple, falling back to the proxy automatically if the direct path can't get through. Same events, no code changes.
+- **2.2.3** — Sessions persist across restarts (device-code sign-in is now a one-time flow), plus a new `OnSessionExpired` event. Nickname validation matches the canonical rule (3–16 chars, letters/numbers/underscores).
+- **2.2.1** — `SubmitScoreToBoard(boardId, score, streak)` for targeted per-level / per-category boards.
+
+Full history is in the header comment of `CheddaBoards.cs`.
 
 ---
 
@@ -79,6 +79,8 @@ void OnGameOver(int score, int streak)
 
 That's it. Leaderboard data is permanently stored on-chain.
 
+Full walkthrough and REST reference: **[docs.cheddaboards.com](https://docs.cheddaboards.com)**.
+
 ---
 
 ## Authentication
@@ -97,7 +99,8 @@ cb.LoginAnonymous("PlayerName");
 > **Nickname rules (server-enforced):** 3–16 characters, letters, numbers, and
 > underscores. Anything else is rejected on nickname changes; names supplied at
 > login are sanitized server-side. If a name is already taken, the server
-> assigns a suffixed variant (e.g. `Player_1`).
+> assigns a suffixed variant (e.g. `Player_1`). See
+> [Authentication](https://docs.cheddaboards.com/api/authentication).
 
 ### Social Login (Google / Apple / Internet Identity)
 
@@ -121,6 +124,8 @@ cb.OnDeviceCodeExpired += () => Debug.Log("Code expired, try again");
 
 cb.LoginWithDeviceCode();
 ```
+
+Full device-code flow, including QR rendering: [Device code login](https://docs.cheddaboards.com/concepts/device-code).
 
 ### Account Migration
 
@@ -160,7 +165,7 @@ cb.OnScoreSubmittedToBoard += (boardId, score, streak) => Debug.Log($"Saved to {
 cb.SubmitScoreToBoard("level-14", 1500, 5); // boardId, score, streak
 ```
 
-The board must be configured as **targeted** in the dashboard. You can call it several times in a row for different boards (e.g. a per-level board plus a shared `runs` board). Failures come back on `OnScoreError`.
+The board must be configured as **targeted** in the dashboard. You can call it several times in a row for different boards (e.g. a per-level board plus a shared `runs` board). Failures come back on `OnScoreError`. More detail: [Category boards](https://docs.cheddaboards.com/concepts/category-boards).
 
 ### Submit Score with Achievements
 
@@ -193,6 +198,8 @@ cb.GetScoreboard("weekly", 100);
 cb.GetScoreboard("level-14", 100);
 ```
 
+Board reads are served directly from the canister for speed, with automatic proxy fallback — see [Scoreboards](https://docs.cheddaboards.com/api/scoreboards).
+
 ### Get Player Rank
 
 ```csharp
@@ -218,6 +225,8 @@ cb.GetLastWeekScoreboard();
 cb.GetLastMonthScoreboard();
 cb.GetYesterdayScoreboard();
 ```
+
+Reset schedules and archive retention: [Timed leaderboards](https://docs.cheddaboards.com/concepts/timed-leaderboards).
 
 ---
 
@@ -257,6 +266,8 @@ cb.SubmitScore(score, streak);
 cb.EndPlaySession();
 ```
 
+Caps, time validation, and the suspicion log: [Anti-cheat](https://docs.cheddaboards.com/concepts/anti-cheat).
+
 ---
 
 ## Events Reference
@@ -267,6 +278,7 @@ cb.EndPlaySession();
 | `OnLoginSuccess` | `nickname` | Login completed |
 | `OnLoginFailed` | `error` | Login failed |
 | `OnLogoutSuccess` | — | Logged out |
+| `OnSessionExpired` | — | Stored session rejected by server (401/403); `OnLogoutSuccess` also fires |
 | `OnScoreSubmitted` | `score, streak` | Score saved (fan-out) |
 | `OnScoreSubmittedToBoard` | `boardId, score, streak` | Targeted score saved to one board |
 | `OnScoreError` | `error` | Score submission failed |
@@ -328,9 +340,8 @@ The SDK is HTTP-only — it works identically everywhere Unity runs:
 
 ## Links
 
+- **Docs**: [docs.cheddaboards.com](https://docs.cheddaboards.com) — guides and full REST API reference
 - **Website**: [cheddaboards.com](https://cheddaboards.com)
-- **Docs**: [Godot SDK repo → /docs](https://github.com/cheddatech/CheddaBoards-Godot/tree/main/docs)
-- **HTTP API reference**: [quickstart-api](https://github.com/cheddatech/CheddaBoards-Godot/blob/main/docs/quickstart-api.md) — the same REST API this SDK wraps
 - **Godot SDK**: [CheddaBoards-Godot](https://github.com/cheddatech/CheddaBoards-Godot)
 - **Backend (open source)**: [cheddaboards](https://github.com/cheddatech/cheddaboards) — the canister this all runs on
 - **Company**: [cheddatech.com](https://cheddatech.com)

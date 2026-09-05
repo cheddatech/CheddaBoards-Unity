@@ -1,4 +1,4 @@
-// CheddaBoards.cs v2.2.3
+// CheddaBoards.cs v2.2.6
 // CheddaBoards integration for Unity
 // https://github.com/cheddatech/CheddaBoards-Unity
 // https://cheddaboards.com
@@ -9,6 +9,28 @@
 //   Player authenticates on their phone at cheddaboards.com/link
 // - Score submissions, play sessions, achievements: all via HTTP API
 //
+// v2.2.6: * Fix: GetAlltimeLeaderboard() queried "all-time-new" and
+//            GetWeeklyLeaderboard() queried "weekly-scoreboard" - both wrong
+//            board IDs that returned nothing. Now "all-time" and "weekly",
+//            matching the auto-created boards every game gets.
+//          * GetLeaderboard() default limit is now 100 (was 1000), matching
+//            GetScoreboard() and every other getter. Pass a limit explicitly
+//            for deeper results; use GetScoreboardRank() to find a position.
+// v2.2.5: Direct canister reads. GetScoreboard() (and the Weekly / Daily /
+//          Alltime / Monthly helpers built on it) now reads straight from the
+//          CheddaBoards canister over the IC HTTP gateway
+//          (fdvph-sqaaa-aaaap-qqc4a-cai.raw.icp0.io) instead of the proxy -
+//          faster board loads, no cold-start lag, and keyless/header-free so
+//          web exports stay CORS-simple. Same JSON, same events, no code
+//          changes needed in your game.
+//          * Automatic proxy fallback: if a direct read can't get through
+//            (network filters raw.icp0.io, a gateway hiccup, a non-JSON error
+//            page), the SDK silently retries the identical request via the
+//            proxy. After 3 consecutive direct failures it stops trying direct
+//            for the session; one success resets the count. A genuine
+//            "not found" from the canister is the real answer, not retried.
+//          * Writes, ranks, archives, and all authenticated calls stay on the
+//            proxy unchanged.
 // v2.2.3: Session persistence + the v2.2.4 nickname validation:
 //          * The session token from device code auth is saved to PlayerPrefs
 //            and restored on startup, so logged-in players stay logged in
@@ -194,6 +216,13 @@ namespace CheddaTech
         /// <summary>HTTP API base URL.</summary>
         public const string API_BASE_URL = "https://api.cheddaboards.com";
 
+        // Public board reads go straight to the CheddaBoards canister over the
+        // IC HTTP gateway (keyless, CORS-simple), with automatic proxy fallback.
+        private const string DIRECT_READ_URL = "https://fdvph-sqaaa-aaaap-qqc4a-cai.raw.icp0.io";
+        private const int DIRECT_READ_MAX_FAILURES = 3;
+        private static readonly HashSet<string> DIRECT_READ_TYPES = new HashSet<string> { "get_scoreboard" };
+        private int _directReadFailures = 0;
+
         /// <summary>Your API key (set via SetApiKey()).</summary>
         public string apiKey = "cb_cheddaclick-v2_122222222";
 
@@ -279,6 +308,8 @@ namespace CheddaTech
             public Dictionary<string, object> body;
             public string requestType;
             public Dictionary<string, object> meta;
+            public bool wentDirect = false;
+            public bool directAttempted = false;
         }
 
         // ============================================================
@@ -397,10 +428,37 @@ namespace CheddaTech
             StartCoroutine(SendHttpRequest(requestData));
         }
 
+        // A direct canister read failed at transport/gateway level. Re-issue the
+        // identical request through the proxy, and after MAX_FAILURES consecutive
+        // direct failures, stop trying direct for the rest of the session.
+        private void RetryViaProxy(RequestData requestData, string reason)
+        {
+            _directReadFailures++;
+            if (_directReadFailures == DIRECT_READ_MAX_FAILURES)
+                Log($"Direct reads disabled for this session after {_directReadFailures} failures");
+            Log($"Direct read failed ({reason}) - retrying via proxy");
+
+            requestData.directAttempted = true;
+            requestData.wentDirect = false;
+            _httpBusy = false;
+            ExecuteHttpRequest(requestData);   // same request, now forced through the proxy
+        }
+
         private IEnumerator SendHttpRequest(RequestData requestData)
         {
-            string url = API_BASE_URL + requestData.endpoint;
-            var headers = BuildHeaders(_currentEndpoint);
+            // Eligible public board reads try the canister first, unless this
+            // request already failed direct or direct is disabled this session.
+            bool useDirect =
+                DIRECT_READ_TYPES.Contains(requestData.requestType)
+                && !requestData.directAttempted
+                && _directReadFailures < DIRECT_READ_MAX_FAILURES;
+            requestData.wentDirect = useDirect;
+
+            // Direct reads are keyless + header-free so web exports stay CORS-simple.
+            string url = (useDirect ? DIRECT_READ_URL : API_BASE_URL) + requestData.endpoint;
+            var headers = useDirect
+                ? new Dictionary<string, string>()
+                : BuildHeaders(_currentEndpoint);
 
             string methodStr = requestData.method;
             Log($"HTTP {methodStr}: {url}");
@@ -447,6 +505,15 @@ namespace CheddaTech
             if (request.result == UnityWebRequest.Result.ConnectionError ||
                 request.result == UnityWebRequest.Result.ProtocolError)
             {
+                // A direct canister read that fails at the network level falls
+                // back to the proxy with the identical request.
+                if (requestData.wentDirect)
+                {
+                    request.Dispose();
+                    RetryViaProxy(requestData, "network");
+                    yield break;
+                }
+
                 // Network-level errors
                 if (request.result == UnityWebRequest.Result.ConnectionError)
                 {
@@ -462,9 +529,22 @@ namespace CheddaTech
             long responseCode = request.responseCode;
             request.Dispose();
 
+            // A direct canister read that returns a gateway error (5xx, or a
+            // non-JSON error page) falls back to the proxy with the same request.
+            if (requestData.wentDirect && (responseCode >= 500 || responseCode == 0))
+            {
+                RetryViaProxy(requestData, $"gateway {responseCode}");
+                yield break;
+            }
+
             var response = ParseJson(responseText) as Dictionary<string, object>;
             if (response == null)
             {
+                if (requestData.wentDirect)
+                {
+                    RetryViaProxy(requestData, "parse");
+                    yield break;
+                }
                 Debug.LogError("[CheddaBoards] Failed to parse JSON response");
                 OnRequestFailed?.Invoke(_currentEndpoint, "Invalid JSON response");
                 EmitHttpFailure("Invalid JSON response");
@@ -552,6 +632,10 @@ namespace CheddaTech
 
             var data = response.ContainsKey("data") ? response["data"] as Dictionary<string, object> : new Dictionary<string, object>();
             if (data == null) data = new Dictionary<string, object>();
+
+            // A clean direct read succeeded — reset the session failure counter.
+            if (requestData.wentDirect)
+                _directReadFailures = 0;
 
             EmitHttpSuccess(data);
         }
@@ -1997,7 +2081,7 @@ namespace CheddaTech
         // PUBLIC API - LEADERBOARDS
         // ============================================================
 
-        public void GetLeaderboard(string sortBy = "score", int limit = 1000)
+        public void GetLeaderboard(string sortBy = "score", int limit = 100)
         {
             string url = $"/leaderboard?sort={sortBy}&limit={limit}";
             MakeHttpRequest(url, "GET", new Dictionary<string, object>(), "leaderboard");
@@ -2084,13 +2168,13 @@ namespace CheddaTech
         }
 
         public void GetWeeklyLeaderboard(int limit = 100, string forGameId = "") =>
-            GetScoreboard("weekly-scoreboard", limit, forGameId);
+            GetScoreboard("weekly", limit, forGameId);
 
         public void GetDailyLeaderboard(int limit = 100, string forGameId = "") =>
             GetScoreboard("daily", limit, forGameId);
 
         public void GetAlltimeLeaderboard(int limit = 100, string forGameId = "") =>
-            GetScoreboard("all-time-new", limit, forGameId);
+            GetScoreboard("all-time", limit, forGameId);
 
         public void GetMonthlyLeaderboard(int limit = 100, string forGameId = "") =>
             GetScoreboard("monthly", limit, forGameId);
