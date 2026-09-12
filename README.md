@@ -11,16 +11,16 @@ Drop-in C# SDK for [CheddaBoards](https://cheddaboards.com) — permanent, serve
 [![Website](https://img.shields.io/badge/website-cheddaboards.com-blue)](https://cheddaboards.com)
 [![Docs](https://img.shields.io/badge/docs-docs.cheddaboards.com-blue)](https://docs.cheddaboards.com)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
-[![Version](https://img.shields.io/badge/version-2.2.6-green)]()
+[![Version](https://img.shields.io/badge/version-2.2.7-green)]()
 
 ---
 
 ## What's new
 
+- **2.2.7** — Three fixes on the anonymous-player paths: submits no longer silently overwrite a player's saved nickname with a generated one; batch achievement sync reports the real synced ids instead of a false "0 synced"; and `GetAchievements()` works again (it now reads from the profile — the standalone route it called never existed). Unnamed players stay unnamed — render them as "Guest".
 - **2.2.6** — Board reads now come **straight from the CheddaBoards canister** for faster loads, with automatic proxy fallback (see 2.2.5). Fixed the `GetAlltimeLeaderboard()` / `GetWeeklyLeaderboard()` helpers, which queried the wrong board IDs. `GetLeaderboard()` default limit is now 100.
 - **2.2.5** — Direct canister reads: `GetScoreboard()` and the Weekly / Daily / Alltime / Monthly helpers read directly from the Internet Computer, keyless and CORS-simple, falling back to the proxy automatically if the direct path can't get through. Same events, no code changes.
 - **2.2.3** — Sessions persist across restarts (device-code sign-in is now a one-time flow), plus a new `OnSessionExpired` event. Nickname validation matches the canonical rule (3–16 chars, letters/numbers/underscores).
-- **2.2.1** — `SubmitScoreToBoard(boardId, score, streak)` for targeted per-level / per-category boards.
 
 Full history is in the header comment of `CheddaBoards.cs`.
 
@@ -68,7 +68,7 @@ void Start()
     cb.OnLoginSuccess += (nickname) => Debug.Log($"Welcome {nickname}!");
     cb.OnScoreSubmitted += (score, streak) => Debug.Log($"Score saved: {score}");
 
-    cb.LoginAnonymous("PlayerName");
+    cb.LoginAnonymous(); // no name: returning players keep their saved nickname
 }
 
 void OnGameOver(int score, int streak)
@@ -83,6 +83,22 @@ Full walkthrough and REST reference: **[docs.cheddaboards.com](https://docs.ched
 
 ---
 
+## Demo — CheddaClick
+
+A complete working example lives in [`Demo/`](Demo/): **CheddaClick**, a
+30-second cheese-clicking game in one script. It shows the full integration —
+anonymous login, guest flow, play sessions, score submit, leaderboard render,
+delta-synced achievements with a standing unlock panel, play count, and
+nickname changes.
+
+To run it: open `Demo/CheddaClick.unity`, put your API key and game ID on the
+`CheddaClickGame` component (or in `CheddaBoards.cs`), and press Play.
+`CheddaClickGame.cs` is commented as a reference — the event wiring and the
+anonymous-player ordering (profile before play, achievements after submit) are
+the patterns to copy into your own game.
+
+---
+
 ## Authentication
 
 ### Anonymous Login
@@ -93,8 +109,14 @@ Instant login with a persistent device ID. No account creation needed.
 cb.OnLoginSuccess += (nickname) => Debug.Log("Logged in: " + nickname);
 cb.OnLoginFailed += (error) => Debug.Log("Failed: " + error);
 
-cb.LoginAnonymous("PlayerName");
+cb.LoginAnonymous();
 ```
+
+Log in **without** a name unless the player has just chosen one: any name you
+pass becomes the current nickname and is written to the server on the next
+submit, overwriting whatever the player had saved. Leave it empty and returning
+players keep their stored name; brand-new players stay unnamed ("Guest") until
+they pick one via `ChangeNickname()`.
 
 > **Nickname rules (server-enforced):** 3–16 characters, letters, numbers, and
 > underscores. Anything else is rejected on nickname changes; names supplied at
@@ -241,7 +263,7 @@ cb.UnlockAchievement("first_win");
 // Batch
 cb.UnlockAchievementsBatch(new List<string> { "first_win", "speed_run" });
 
-// Load player's achievements
+// Load player's achievements (reads from the player's profile)
 cb.OnAchievementsLoaded += (achievements) => Debug.Log($"Got {achievements.Count} achievements");
 cb.GetAchievements();
 ```
@@ -352,7 +374,3 @@ The SDK is HTTP-only — it works identically everywhere Unity runs:
 ## License
 
 MIT — see [LICENSE](LICENSE)
-
----
-
-**Built by [CheddaTech Ltd](https://cheddatech.com) on the Internet Computer.**

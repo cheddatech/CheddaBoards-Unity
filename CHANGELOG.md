@@ -4,6 +4,22 @@ All notable changes to the CheddaBoards Unity SDK are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.2.7]
+
+Two fixes and one repaired method on the anonymous-player paths, matching the Godot SDK v2.2.7 release. No API changes — drop-in for existing games.
+
+### Fixed
+- **`GetAchievements()` works again.** It called `GET /players/{id}/achievements`, a route the API doesn't have — the server answered `"Unknown endpoint"` and `OnAchievementsLoaded` never fired with data. Achievements are only exposed on the profile, so the method now fetches the profile and surfaces `gameProfile.achievements` via `OnAchievementsLoaded`. `OnProfileLoaded` does **not** fire for this call, so existing profile handlers aren't double-triggered — and reading achievements from `OnProfileLoaded` directly still works exactly as before.
+- **Submits no longer rename the player.** All three submit paths (`SubmitScore`, `SubmitScoreWithAchievements`, `SubmitScoreToBoard`) always sent a nickname, filling in a generated `Player_XXXXXX` when none was set — so every submit by a returning anonymous player whose profile hadn't loaded yet silently overwrote their saved name with a fresh generated one. The `nickname` field is now omitted from the submit body unless the caller actually set one; the server keeps the existing profile name. The profile parser also no longer backfills a generated name into the cached nickname when a profile arrives unnamed — that read-path leak would have written a generated name back on the very next submit. Games that force-loaded the profile at startup to dodge this still work unchanged; the workaround is just no longer needed.
+- **Batch achievement sync no longer reports "0 synced" on success.** The response parser read a `synced` count key the server doesn't send (the real key is `unlocked`) and accepted only one exact `results` shape, so a successful batch logged `Batch achievement sync complete: 0 synced` and `OnAchievementsLoaded` could fire empty — a false failure on a write that actually persisted. The reported count is now the number of ids actually parsed; the parser tolerates alternate array keys (`unlocked` / `syncedIds` / `achievements`), alternate id keys (`id` / `achievement`), plain id-string arrays, and non-bool success flags; and if an HTTP 200 body still isn't recognised, the **requested** ids are reported as synced (raw body logged for diagnosis) — a 200 means the server stored them. Verified against live API v1.8.0: `data.results[]` of `{achievementId, success, message}`, where re-sends of already-unlocked ids also return `success: true`.
+
+### Added
+- `CheddaBoards.VERSION` constant; the init banner now reads from it (it had been reporting a stale version).
+- JSON parse failures now log the HTTP status, byte count, first character codes, and raw body — enough to diagnose an empty body, an HTML error page, or a BOM from a single log line.
+
+### Changed
+- **Unnamed anonymous players stay unnamed.** With the submit fix above, a player who never sets a name keeps an empty nickname server-side instead of accumulating generated ones. Render these as `"Guest"` in your UI — `GetNickname()` already returns `""` for this case (since 2.2.0).
+
 ## [2.2.6]
 
 ### Fixed

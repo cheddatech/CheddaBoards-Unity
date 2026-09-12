@@ -1,4 +1,4 @@
-// CheddaBoards.cs v2.2.6
+// CheddaBoards.cs v2.2.7
 // CheddaBoards integration for Unity
 // https://github.com/cheddatech/CheddaBoards-Unity
 // https://cheddaboards.com
@@ -9,6 +9,39 @@
 //   Player authenticates on their phone at cheddaboards.com/link
 // - Score submissions, play sessions, achievements: all via HTTP API
 //
+// v2.2.7:
+//   - Submits no longer rename the player. All three submit paths
+//     (SubmitScore, SubmitScoreWithAchievements, SubmitScoreToBoard)
+//     used to ALWAYS send a nickname, generating a "Player_XXXXXX"
+//     fallback when _nickname was empty - so every submit by a returning
+//     anonymous player whose profile hadn't loaded yet silently overwrote
+//     their saved name. The nickname field is now omitted from the submit
+//     body unless the caller actually set one; the server keeps the
+//     existing profile name. The profile parser also no longer backfills
+//     a generated name into _nickname when a profile arrives unnamed
+//     (that read-path leak would have written a generated name back on
+//     the next submit). Unnamed anonymous players stay unnamed - render
+//     them as "Guest" in your UI (GetNickname() already returns "" for
+//     this case).
+//   - Batch achievement sync no longer reports "0 synced" on success.
+//     The parser read a "synced" count key the server doesn't send (the
+//     real key is "unlocked"), and only accepted one exact results shape.
+//     Now: (a) the reported count is the number of ids actually parsed;
+//     (b) tolerant parsing accepts plain id arrays, alternate array keys
+//     (unlocked/syncedIds/achievements), alternate id keys
+//     (id/achievement), and non-bool success flags; (c) on HTTP 200, if
+//     the body shape still isn't recognised, the REQUESTED ids are
+//     reported as synced (raw body logged for diagnosis) - a 200 means
+//     the server stored them. Verified against the live API (v1.8.0):
+//     data.results[] of {achievementId, success, message}, where
+//     re-sends of already-unlocked ids also return success:true.
+//     OnAchievementsLoaded now always carries the real synced set.
+//   - GetAchievements() works again. It called
+//     GET /players/{id}/achievements, a route the API doesn't have
+//     ("Unknown endpoint"). Achievements are only exposed on the profile,
+//     so it now fetches the profile and surfaces gameProfile.achievements
+//     via OnAchievementsLoaded. OnProfileLoaded does not fire for this
+//     call; reading achievements from OnProfileLoaded also still works.
 // v2.2.6: * Fix: GetAlltimeLeaderboard() queried "all-time-new" and
 //            GetWeeklyLeaderboard() queried "weekly-scoreboard" - both wrong
 //            board IDs that returned nothing. Now "all-time" and "weekly",
@@ -97,6 +130,9 @@ namespace CheddaTech
     /// </summary>
     public class CheddaBoards : MonoBehaviour
     {
+        /// <summary>SDK version. Keep in sync with the header changelog.</summary>
+        public const string VERSION = "2.2.7";
+
         // ============================================================
         // SINGLETON
         // ============================================================
@@ -285,6 +321,10 @@ namespace CheddaTech
         private List<string> _deferredAchievementIds = new List<string>();
         private int _deferredAchievementsRemaining = 0;
         private List<string> _deferredAchievementsSynced = new List<string>();
+        // Ids sent in the most recent batch request. On HTTP 200 the server
+        // has persisted them, so if the response body can't be parsed these
+        // are what gets reported — never "0 synced" on a success.
+        private List<string> _lastBatchIds = new List<string>();
 
         // ============================================================
         // PERSISTENT DEVICE ID
@@ -326,7 +366,7 @@ namespace CheddaTech
             _instance = this;
             DontDestroyOnLoad(gameObject);
 
-            Log("Initializing CheddaBoards v2.2.3 (HTTP API Mode)...");
+            Log($"Initializing CheddaBoards v{VERSION} (HTTP API Mode)...");
             LoadSavedSession();
             _initComplete = true;
             StartCoroutine(EmitSdkReadyDeferred());
@@ -545,7 +585,15 @@ namespace CheddaTech
                     RetryViaProxy(requestData, "parse");
                     yield break;
                 }
-                Debug.LogError("[CheddaBoards] Failed to parse JSON response");
+                string firstChars = "n/a";
+                if (!string.IsNullOrEmpty(responseText))
+                {
+                    var codes = new List<string>();
+                    for (int ci = 0; ci < Math.Min(3, responseText.Length); ci++)
+                        codes.Add(((int)responseText[ci]).ToString());
+                    firstChars = string.Join(",", codes);
+                }
+                Debug.LogError($"[CheddaBoards] Failed to parse JSON response (HTTP {responseCode}, {(responseText == null ? "null" : responseText.Length.ToString())} chars, first char codes: {firstChars}): {responseText}");
                 OnRequestFailed?.Invoke(_currentEndpoint, "Invalid JSON response");
                 EmitHttpFailure("Invalid JSON response");
                 yield break;
@@ -720,36 +768,30 @@ namespace CheddaTech
                 else if (requestType == "unlock_achievement_batch")
                 {
                     var resp = ParseJson(responseText) as Dictionary<string, object>;
-                    if (resp != null && resp.ContainsKey("data"))
+                    var asyncData = (resp != null && resp.ContainsKey("data"))
+                        ? resp["data"] as Dictionary<string, object>
+                        : null;
+
+                    var syncedIds = ParseBatchSyncedIds(asyncData);
+                    if (syncedIds.Count == 0 && _lastBatchIds.Count > 0)
                     {
-                        var asyncData = resp["data"] as Dictionary<string, object>;
-                        if (asyncData != null)
-                        {
-                            int synced = SafeInt(asyncData.ContainsKey("synced") ? asyncData["synced"] : 0);
-                            var results = asyncData.ContainsKey("results") ? asyncData["results"] as List<object> : new List<object>();
-                            Log($"Batch achievement sync complete: {synced} synced");
-                            if (results != null)
-                            {
-                                foreach (var r in results)
-                                {
-                                    var result = r as Dictionary<string, object>;
-                                    if (result != null)
-                                    {
-                                        bool success = result.ContainsKey("success") && result["success"] is bool b2 && b2;
-                                        if (success)
-                                        {
-                                            string achId = GetString(result, "achievementId", "");
-                                            _deferredAchievementsSynced.Add(achId);
-                                            OnAchievementUnlocked?.Invoke(achId);
-                                        }
-                                    }
-                                }
-                            }
-                            OnAchievementsLoaded?.Invoke(new List<object>(_deferredAchievementsSynced));
-                            _deferredAchievementsSynced.Clear();
-                            _deferredAchievementsRemaining = 0;
-                        }
+                        // HTTP 200 means the server persisted the batch even if
+                        // the body shape isn't one we recognise — report the
+                        // requested ids rather than a false "0 synced".
+                        Log("Batch response shape unrecognised; reporting requested ids as synced. Raw: " + responseText);
+                        syncedIds = new List<string>(_lastBatchIds);
                     }
+
+                    Log($"Batch achievement sync complete: {syncedIds.Count} synced");
+                    foreach (string achId in syncedIds)
+                    {
+                        _deferredAchievementsSynced.Add(achId);
+                        OnAchievementUnlocked?.Invoke(achId);
+                    }
+                    OnAchievementsLoaded?.Invoke(new List<object>(_deferredAchievementsSynced));
+                    _deferredAchievementsSynced.Clear();
+                    _deferredAchievementsRemaining = 0;
+                    _lastBatchIds.Clear();
                 }
             }
             else
@@ -772,6 +814,7 @@ namespace CheddaTech
                     OnAchievementsLoaded?.Invoke(new List<object>());
                     _deferredAchievementsSynced.Clear();
                     _deferredAchievementsRemaining = 0;
+                    _lastBatchIds.Clear();
                 }
             }
         }
@@ -876,32 +919,34 @@ namespace CheddaTech
 
                 case "unlock_achievement_batch":
                 {
-                    int synced = SafeInt(data.ContainsKey("synced") ? data["synced"] : 0);
-                    var results = GetList(data, "results");
-                    Log($"Batch achievement sync complete: {synced} synced");
-                    foreach (var r in results)
+                    var syncedIds = ParseBatchSyncedIds(data);
+                    if (syncedIds.Count == 0 && _lastBatchIds.Count > 0)
                     {
-                        var result = r as Dictionary<string, object>;
-                        if (result != null)
-                        {
-                            bool success = result.ContainsKey("success") && result["success"] is bool b && b;
-                            if (success)
-                            {
-                                string achId = GetString(result, "achievementId", "");
-                                _deferredAchievementsSynced.Add(achId);
-                                OnAchievementUnlocked?.Invoke(achId);
-                            }
-                        }
+                        Log("Batch response shape unrecognised; reporting requested ids as synced.");
+                        syncedIds = new List<string>(_lastBatchIds);
+                    }
+                    Log($"Batch achievement sync complete: {syncedIds.Count} synced");
+                    foreach (string achId in syncedIds)
+                    {
+                        _deferredAchievementsSynced.Add(achId);
+                        OnAchievementUnlocked?.Invoke(achId);
                     }
                     OnAchievementsLoaded?.Invoke(new List<object>(_deferredAchievementsSynced));
                     _deferredAchievementsSynced.Clear();
                     _deferredAchievementsRemaining = 0;
+                    _lastBatchIds.Clear();
                     break;
                 }
 
                 case "achievements":
                 {
-                    var achievements = GetList(data, "achievements");
+                    // Response is a profile: achievements sit under
+                    // gameProfile.achievements. Top-level "achievements" is
+                    // kept as a fallback for older/alternate responses.
+                    var gp = data.ContainsKey("gameProfile") ? data["gameProfile"] as Dictionary<string, object> : null;
+                    var achievements = gp != null ? GetList(gp, "achievements") : new List<object>();
+                    if (achievements.Count == 0)
+                        achievements = GetList(data, "achievements");
                     OnAchievementsLoaded?.Invoke(achievements);
                     break;
                 }
@@ -1092,6 +1137,7 @@ namespace CheddaTech
                     OnAchievementsLoaded?.Invoke(new List<object>());
                     _deferredAchievementsSynced.Clear();
                     _deferredAchievementsRemaining = 0;
+                    _lastBatchIds.Clear();
                     break;
                 case "achievements":
                     OnAchievementsLoaded?.Invoke(new List<object>());
@@ -1178,8 +1224,11 @@ namespace CheddaTech
 
             _cachedProfile = new Dictionary<string, object>(profile);
 
+            // Unnamed profile stays unnamed. Backfilling GetDefaultNickname() here
+            // would set _nickname to a generated name, and the next submit would
+            // write it to the server — reintroducing the rename bug via the read path.
             string nickname = GetString(profile, "nickname",
-                              GetString(profile, "username", GetDefaultNickname()));
+                              GetString(profile, "username", ""));
 
             // Handle nested gameProfile from API
             var gameProfile = profile.ContainsKey("gameProfile") ? profile["gameProfile"] as Dictionary<string, object> : null;
@@ -1909,19 +1958,22 @@ namespace CheddaTech
             _pendingScore = score;
             _pendingStreak = streak;
 
-            string nick = !string.IsNullOrEmpty(_nickname) ? _nickname : GetDefaultNickname();
+            // Only send a nickname the caller actually set. Omitting the field
+            // lets the server keep the existing profile name — a submit should
+            // update the score, not silently rename the player.
             var body = new Dictionary<string, object>
             {
                 { "playerId", GetPlayerId() },
                 { "gameId", gameId },
                 { "score", score },
-                { "streak", streak },
-                { "nickname", nick }
+                { "streak", streak }
             };
+            if (!string.IsNullOrEmpty(_nickname))
+                body["nickname"] = _nickname;
             if (!string.IsNullOrEmpty(_playSessionToken))
                 body["playSessionToken"] = _playSessionToken;
 
-            Log($"Submitting: score={score}, streak={streak}, nickname={nick}, gameId={gameId}, playerId={body["playerId"]}, session={(_playSessionToken.Length > 20 ? _playSessionToken.Substring(0, 20) : _playSessionToken)}");
+            Log($"Submitting: score={score}, streak={streak}, nickname={(string.IsNullOrEmpty(_nickname) ? "(unset)" : _nickname)}, gameId={gameId}, playerId={body["playerId"]}, session={(_playSessionToken.Length > 20 ? _playSessionToken.Substring(0, 20) : _playSessionToken)}");
             MakeHttpRequest("/scores", "POST", body, "submit_score");
         }
 
@@ -1956,20 +2008,21 @@ namespace CheddaTech
             _deferredAchievementsRemaining = 0;
             _deferredAchievementsSynced = new List<string>();
 
-            // Submit score FIRST (creates/updates player profile on backend)
-            string nick = !string.IsNullOrEmpty(_nickname) ? _nickname : GetDefaultNickname();
+            // Submit score FIRST (creates/updates player profile on backend).
+            // Nickname is only sent when the caller actually set one — see SubmitScore.
             var scoreBody = new Dictionary<string, object>
             {
                 { "playerId", GetPlayerId() },
                 { "gameId", gameId },
                 { "score", score },
-                { "streak", streak },
-                { "nickname", nick }
+                { "streak", streak }
             };
+            if (!string.IsNullOrEmpty(_nickname))
+                scoreBody["nickname"] = _nickname;
             if (!string.IsNullOrEmpty(_playSessionToken))
                 scoreBody["playSessionToken"] = _playSessionToken;
 
-            Log($"Submitting: score={score}, streak={streak}, nickname={nick}, gameId={gameId}, playerId={scoreBody["playerId"]}, session={(_playSessionToken.Length > 20 ? _playSessionToken.Substring(0, 20) : _playSessionToken)}");
+            Log($"Submitting: score={score}, streak={streak}, nickname={(string.IsNullOrEmpty(_nickname) ? "(unset)" : _nickname)}, gameId={gameId}, playerId={scoreBody["playerId"]}, session={(_playSessionToken.Length > 20 ? _playSessionToken.Substring(0, 20) : _playSessionToken)}");
             MakeHttpRequest("/scores", "POST", scoreBody, "submit_score");
         }
 
@@ -2010,16 +2063,17 @@ namespace CheddaTech
                 return;
             }
 
-            string nick = !string.IsNullOrEmpty(_nickname) ? _nickname : GetDefaultNickname();
+            // Nickname only sent when the caller actually set one — see SubmitScore.
             var body = new Dictionary<string, object>
             {
                 { "playerId", GetPlayerId() },
                 { "gameId", gameId },
                 { "score", score },
                 { "streak", streak },
-                { "nickname", nick },
                 { "scoreboardId", scoreboardId }
             };
+            if (!string.IsNullOrEmpty(_nickname))
+                body["nickname"] = _nickname;
             if (!string.IsNullOrEmpty(_playSessionToken))
                 body["playSessionToken"] = _playSessionToken;
 
@@ -2278,6 +2332,7 @@ namespace CheddaTech
             Log($"Batch unlocking {achievementIds.Count} achievements...");
             _deferredAchievementsRemaining = 1;
             _deferredAchievementsSynced = new List<string>();
+            _lastBatchIds = new List<string>(achievementIds);
 
             var body = new Dictionary<string, object>
             {
@@ -2289,10 +2344,29 @@ namespace CheddaTech
 
         public void GetAchievements(string playerId = "")
         {
-            string pid = !string.IsNullOrEmpty(playerId) ? playerId : GetPlayerId();
-            string url = $"/players/{Uri.EscapeDataString(pid)}/achievements";
-            MakeHttpRequest(url, "GET", new Dictionary<string, object>(), "achievements");
-            Log($"Achievements requested for: {pid}");
+            // Achievements live on the profile (gameProfile.achievements) -
+            // there is no standalone /players/{id}/achievements route (the
+            // old URL returned "Unknown endpoint"). This fetches the profile
+            // and surfaces just the achievements via OnAchievementsLoaded;
+            // OnProfileLoaded does NOT fire for this call.
+            if (!string.IsNullOrEmpty(_sessionToken) && string.IsNullOrEmpty(playerId))
+            {
+                MakeHttpRequest("/auth/profile", "GET", new Dictionary<string, object>(), "achievements");
+                Log("Achievements requested (session profile)");
+            }
+            else
+            {
+                string pid = !string.IsNullOrEmpty(playerId) ? playerId : GetPlayerId();
+                if (string.IsNullOrEmpty(pid))
+                {
+                    Log("No player ID for achievements fetch");
+                    OnAchievementsLoaded?.Invoke(new List<object>());
+                    return;
+                }
+                string url = $"/players/{Uri.EscapeDataString(pid)}/profile";
+                MakeHttpRequest(url, "GET", new Dictionary<string, object>(), "achievements");
+                Log($"Achievements requested for: {pid}");
+            }
         }
 
         /// <summary>Send all deferred achievements in a single batch request.</summary>
@@ -2302,6 +2376,7 @@ namespace CheddaTech
             int count = _deferredAchievementIds.Count;
             _deferredAchievementsRemaining = 1;
             _deferredAchievementsSynced = new List<string>();
+            _lastBatchIds = new List<string>(_deferredAchievementIds);
             Log($"Batch syncing {count} achievements...");
 
             var body = new Dictionary<string, object>
@@ -2660,6 +2735,58 @@ namespace CheddaTech
             if (dict != null && dict.ContainsKey(key) && dict[key] is List<object> list)
                 return list;
             return new List<object>();
+        }
+
+        // Tolerant batch-response reader. Canonical shape is data.results[] of
+        // {success, achievementId}, but this also accepts the shapes a backend
+        // plausibly returns: plain id-string arrays, alternate array keys
+        // (unlocked / syncedIds / achievements), alternate id keys
+        // (id / achievement), and non-bool success flags. Returns empty when
+        // nothing matches — callers fall back to the requested ids on HTTP 200.
+        private static List<string> ParseBatchSyncedIds(Dictionary<string, object> data)
+        {
+            var ids = new List<string>();
+            if (data == null) return ids;
+
+            foreach (string key in new[] { "results", "unlocked", "syncedIds", "achievements" })
+            {
+                var list = GetList(data, key);
+                if (list.Count == 0) continue;
+                foreach (var entry in list)
+                {
+                    if (entry is string s)
+                    {
+                        if (!string.IsNullOrEmpty(s)) ids.Add(s);
+                        continue;
+                    }
+                    var d = entry as Dictionary<string, object>;
+                    if (d == null) continue;
+                    // Success flag is optional; when present, accept any truthy form.
+                    if (d.ContainsKey("success") && !Truthy(d["success"])) continue;
+                    if (d.ContainsKey("ok") && !Truthy(d["ok"])) continue;
+                    string id = GetString(d, "achievementId",
+                                GetString(d, "id",
+                                GetString(d, "achievement", "")));
+                    if (!string.IsNullOrEmpty(id)) ids.Add(id);
+                }
+                if (ids.Count > 0) return ids;
+            }
+            return ids;
+        }
+
+        private static bool Truthy(object v)
+        {
+            if (v is bool b) return b;
+            if (v is string s)
+            {
+                string t = s.Trim().ToLowerInvariant();
+                return t == "true" || t == "1" || t == "ok" || t == "success";
+            }
+            if (v is int i) return i != 0;
+            if (v is long l) return l != 0;
+            if (v is float f) return f != 0f;
+            if (v is double d2) return d2 != 0d;
+            return v != null;
         }
 
         private string GetMetaString(string key)
