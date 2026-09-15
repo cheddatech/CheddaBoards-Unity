@@ -281,6 +281,24 @@ namespace CheddaTech
         private bool _nicknameJustChanged = false;
         private string _nickname = "";
 
+        // Rename correctness state (v2.2.8):
+        // _playerExistsOnBackend - true once ANY server op confirms the player
+        //   (submit success or profile load). ChangeNickname gates on this, NOT
+        //   on _cachedProfile - the cache can stay empty long after the first
+        //   submit (fetch chained/failed), which used to send real players'
+        //   renames down the local-only branch: OnNicknameChanged fired,
+        //   nothing was sent, the board never updated. (Same bug as the Godot
+        //   SDK rename race, fixed there in 2.2.6.)
+        // _pendingServerNickname - a name set locally before the player existed;
+        //   re-synced to the server once a profile loads (capped retries).
+        // _requestedNickname - the name sent in the last rename PUT, used as a
+        //   fallback when a 2xx/ok response doesn't echo the nickname back
+        //   (the old handler silently did NOTHING in that case).
+        private bool _playerExistsOnBackend = false;
+        private string _pendingServerNickname = "";
+        private int _pendingRenameAttempts = 0;
+        private string _requestedNickname = "";
+
         // ============================================================
         // PERFORMANCE OPTIMIZATION
         // ============================================================
@@ -831,6 +849,10 @@ namespace CheddaTech
             {
                 case "submit_score":
                     _isSubmittingScore = false;
+                    _playerExistsOnBackend = true;   // submit creates/updates the player
+                    // If a local-only rename is pending, the submit body just
+                    // carried it (_nickname was set) - the profile fetch that
+                    // follows confirms and clears _pendingServerNickname.
                     Log($"Score submission successful: {_pendingScore} points, {_pendingStreak} streak");
                     OnScoreSubmitted?.Invoke(_pendingScore, _pendingStreak);
                     FlushDeferredAchievements();
@@ -838,6 +860,7 @@ namespace CheddaTech
 
                 case "submit_score_to_board":
                 {
+                    _playerExistsOnBackend = true;
                     string sbId = GetMetaString("scoreboard_id");
                     int sbScore = SafeInt(_currentMeta.ContainsKey("score") ? _currentMeta["score"] : 0);
                     int sbStreak = SafeInt(_currentMeta.ContainsKey("streak") ? _currentMeta["streak"] : 0);
@@ -866,16 +889,37 @@ namespace CheddaTech
                     if (data != null && data.Count > 0)
                         UpdateCachedProfile(data);
                     else
+                    {
+                        // Distinct from the 404 path: the request SUCCEEDED but
+                        // the body carried no profile data. If this fires for a
+                        // player who has submitted, the proxy's profile response
+                        // shape needs checking, not the player's existence.
+                        Log("Profile response OK but empty - treating as no profile");
                         OnNoProfile?.Invoke();
+                    }
                     break;
 
                 case "change_nickname":
                 {
                     string newNick = GetString(data, "nickname", "");
+                    if (newNick == "" && !string.IsNullOrEmpty(_requestedNickname))
+                    {
+                        // 2xx + ok:true means the rename landed even if the
+                        // response doesn't echo the name back. Prefer the
+                        // echoed name when present (server may suffix on
+                        // collision, e.g. Name_1); otherwise report what we
+                        // asked for. The old handler silently did NOTHING
+                        // here - no event, no error, no board refresh.
+                        Log("Rename response had no nickname field - using requested name");
+                        newNick = _requestedNickname;
+                    }
+                    _requestedNickname = "";
                     if (newNick != "")
                     {
                         _nickname = newNick;
                         _nicknameJustChanged = true;
+                        _pendingServerNickname = "";
+                        _pendingRenameAttempts = 0;
                         if (_cachedProfile.Count > 0)
                             _cachedProfile["nickname"] = newNick;
                         OnNicknameChanged?.Invoke(newNick);
@@ -887,10 +931,18 @@ namespace CheddaTech
                 case "change_nickname_anonymous":
                 {
                     string newNick = GetString(data, "nickname", "");
+                    if (newNick == "" && !string.IsNullOrEmpty(_requestedNickname))
+                    {
+                        Log("Rename response had no nickname field - using requested name");
+                        newNick = _requestedNickname;
+                    }
+                    _requestedNickname = "";
                     if (newNick != "")
                     {
                         _nickname = newNick;
                         _nicknameJustChanged = true;
+                        _pendingServerNickname = "";
+                        _pendingRenameAttempts = 0;
                         if (_cachedProfile.Count > 0)
                             _cachedProfile["nickname"] = newNick;
                         OnNicknameChanged?.Invoke(newNick);
@@ -1120,6 +1172,7 @@ namespace CheddaTech
                     break;
                 case "change_nickname":
                 case "change_nickname_anonymous":
+                    _requestedNickname = "";
                     OnNicknameError?.Invoke(error);
                     break;
                 case "unlock_achievement":
@@ -1216,12 +1269,39 @@ namespace CheddaTech
         {
             if (profile == null || profile.Count == 0) return;
 
+            _playerExistsOnBackend = true;   // a profile loaded, so the player exists
+
             // Preserve nickname from recent rename - backend may return stale data
             if (_nicknameJustChanged && !string.IsNullOrEmpty(_nickname))
             {
                 profile["nickname"] = _nickname;
                 Log($"Preserving renamed nickname '{_nickname}' over stale backend data");
                 _nicknameJustChanged = false;
+            }
+
+            // A name set locally BEFORE the player existed must win over the
+            // server's empty/old name, and now that a rename can land, push it.
+            // Capped so a persistently rejected name can't loop forever.
+            if (!string.IsNullOrEmpty(_pendingServerNickname))
+            {
+                string serverNick = GetString(profile, "nickname",
+                                    GetString(profile, "username", ""));
+                if (serverNick == _pendingServerNickname)
+                {
+                    // First submit carried it - all synced.
+                    _pendingServerNickname = "";
+                    _pendingRenameAttempts = 0;
+                }
+                else
+                {
+                    profile["nickname"] = _pendingServerNickname;
+                    if (_pendingRenameAttempts < 2)
+                    {
+                        _pendingRenameAttempts++;
+                        Log($"Re-syncing locally set nickname '{_pendingServerNickname}' to backend (attempt {_pendingRenameAttempts})");
+                        ChangeNickname(_pendingServerNickname);
+                    }
+                }
             }
 
             _cachedProfile = new Dictionary<string, object>(profile);
@@ -1636,17 +1716,24 @@ namespace CheddaTech
                 }
             }
 
-            // Anonymous players who haven't submitted a score yet don't exist on backend
-            if (IsAnonymous() && _cachedProfile.Count == 0)
+            // Anonymous players who have never touched the backend don't exist
+            // there yet, so a rename has nowhere to land - stash it locally.
+            // It rides the first submit (SubmitScore sends _nickname when set)
+            // and is re-synced from the profile path as a belt-and-braces.
+            // Gate on confirmed existence, never on _cachedProfile (see field docs).
+            if (IsAnonymous() && !_playerExistsOnBackend)
             {
                 _nickname = newNickname;
-                Log($"Nickname set locally (no backend profile yet): {newNickname}");
+                _pendingServerNickname = newNickname;
+                _pendingRenameAttempts = 0;
+                Log($"Nickname set locally (player not on backend yet): {newNickname} - will sync on first submit");
                 OnNicknameChanged?.Invoke(newNickname);
                 return;
             }
 
             if (!string.IsNullOrEmpty(_sessionToken))
             {
+                _requestedNickname = newNickname;
                 var body = new Dictionary<string, object> { { "nickname", newNickname } };
                 MakeHttpRequest("/profile/nickname", "PUT", body, "change_nickname");
                 Log($"Nickname change requested (session) -> {newNickname}");
@@ -1659,6 +1746,7 @@ namespace CheddaTech
                     OnNicknameError?.Invoke("No player ID set");
                     return;
                 }
+                _requestedNickname = newNickname;
                 var body = new Dictionary<string, object> { { "nickname", newNickname } };
                 string url = $"/players/{Uri.EscapeDataString(pid)}/nickname";
                 MakeHttpRequest(url, "PUT", body, "change_nickname_anonymous");
