@@ -186,6 +186,7 @@ namespace CheddaTech
 
         // --- Initialization ---
         public event Action OnSdkReady;
+        #pragma warning disable 0067  // declared for the public API; raised in a future release
         public event Action<string> OnInitError;
 
         // --- Authentication ---
@@ -235,6 +236,7 @@ namespace CheddaTech
         // --- Account Upgrade (Anonymous → Verified) ---
         public event Action<Dictionary<string, object>, Dictionary<string, object>> OnAccountUpgraded;
         public event Action<string> OnAccountUpgradeFailed;
+        #pragma warning restore 0067
 
         // --- Device Code Auth (Cross-platform login) ---
         public event Action<string, string, string> OnDeviceCodeReceived;
