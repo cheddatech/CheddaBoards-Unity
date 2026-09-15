@@ -262,10 +262,10 @@ namespace CheddaTech
         private int _directReadFailures = 0;
 
         /// <summary>Your API key (set via SetApiKey()).</summary>
-        public string apiKey = "cb_cheddaclick-v2_122222222";
+        public string apiKey = "";
 
         /// <summary>Your game ID (set via SetGameId()).</summary>
-        public string gameId = "cheddaclick-v2";
+        public string gameId = "";
 
         private string _playerId = "";
         private string _sessionToken = "";       // For OAuth session-based auth
