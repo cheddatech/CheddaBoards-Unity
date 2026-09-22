@@ -17,23 +17,5 @@ IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
 FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
 AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE.
-
----
-
-## Third-Party Assets
-
-The MIT license above applies to the CheddaBoards SDK and demo code.
-The following third-party assets are included in the demo and are
-licensed under their own terms:
-
-### Zero Cool font
-
-- Author: GGBotNet (https://ggbot.itch.io/zero-cool-font)
-- Copyright (c) 2023 GGBotNet
-- License: SIL Open Font License 1.1 (https://openfontlicense.org)
-- Used in the CheddaClick demo scene only; not required by the SDK.
-
-The Zero Cool font is distributed under the SIL OFL 1.1, which permits
-use, modification, and redistribution, provided this copyright notice
-and the license accompany the font.
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

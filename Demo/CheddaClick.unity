@@ -2447,7 +2447,7 @@ MonoBehaviour:
   achievementToast: {fileID: 844910817}
   achievementList: {fileID: 372189537}
   playCountText: {fileID: 222235084}
-  runSeconds: 10
+  runSeconds: 30
   comboWindow: 1
   autoAssignPlayerName: 1
 --- !u!4 &1685718700
