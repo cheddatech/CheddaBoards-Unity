@@ -1,16 +1,13 @@
-# CheddaBoards for Unity
+<p align="center">
+  <img src="assets/logo.png" alt="CheddaBoards" width="420">
+</p>
 
-Free online leaderboards and achievements for Unity games. One C# file, no packages, no server to run.
+# CheddaBoards Unity SDK
 
-SDK version: 2.2.7 · Supports Unity 2022.3 LTS and newer.
+**Leaderboards, achievements, and auth for Unity. Any platform. 3-minute setup.**
 
-## Quick start
+Drop-in C# SDK for [CheddaBoards](https://cheddaboards.com) — permanent, serverless gaming infrastructure powered by the Internet Computer.
 
-<<<<<<< HEAD
-1. Get a free API key: register your game at https://cheddaboards.com/developers (takes a minute, no card).
-2. The SDK is a single script — `CheddaBoards.cs`. It's already in this package; nothing else to install.
-3. Wire it up:
-=======
 [![Website](https://img.shields.io/badge/website-cheddaboards.com-blue)](https://cheddaboards.com)
 [![Docs](https://img.shields.io/badge/docs-docs.cheddaboards.com-blue)](https://docs.cheddaboards.com)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
@@ -52,44 +49,44 @@ Full history is in the header comment of `CheddaBoards.cs`.
 Copy `CheddaBoards.cs` into your Unity project (e.g. `Assets/Scripts/CheddaBoards.cs`).
 
 ### 2. Configure
->>>>>>> 8a55c79 (update status link on readme)
 
 ```csharp
-var cb = CheddaBoards.Instance;
+var cb = CheddaBoards.Instance; // Auto-creates singleton GameObject
 cb.SetApiKey("your-api-key");
 cb.SetGameId("your-game-id");
-cb.OnLoginSuccess += (nick) => canSubmit = true;
-cb.LoginAnonymous();          // no player accounts needed
-
-// at game over:
-CheddaBoards.Instance.SubmitScore(score, streak);
 ```
 
-Every game gets all-time, weekly and daily boards automatically, with resets and archiving handled for you.
+Get your API key and game ID from the [CheddaBoards Dashboard](https://cheddaboards.com).
 
-## Demo
+### 3. Login and submit scores
 
-Open `Demo/CheddaClick.unity` — a complete 30-second clicker showing login, score submission, achievements and a live leaderboard with board switching. Replace the placeholder API key and game ID with your own to see your scores appear on your dashboard.
+```csharp
+void Start()
+{
+    var cb = CheddaBoards.Instance;
+    cb.SetApiKey("your-api-key");
+    cb.SetGameId("your-game-id");
 
-The demo UI uses TextMeshPro. If your project doesn't have it yet, Unity will prompt you to import TMP Essentials (free, built into Unity) when you open the scene. The SDK itself (`CheddaBoards.cs`) has no dependencies and doesn't need TMP.
+    cb.OnLoginSuccess += (nickname) => Debug.Log($"Welcome {nickname}!");
+    cb.OnScoreSubmitted += (score, streak) => Debug.Log($"Score saved: {score}");
 
-## Documentation
+    cb.LoginAnonymous(); // no name: returning players keep their saved nickname
+}
 
-Full guides, REST reference and troubleshooting: https://docs.cheddaboards.com
+void OnGameOver(int score, int streak)
+{
+    CheddaBoards.Instance.SubmitScore(score, streak);
+}
+```
 
-- Unity quick start: https://docs.cheddaboards.com/quickstart/unity
-- Anti-cheat (optional): https://docs.cheddaboards.com/concepts/anti-cheat
-- Category boards: https://docs.cheddaboards.com/concepts/category-boards
+That's it. Leaderboard data is permanently stored on-chain.
 
-## Service & costs
+Full walkthrough and REST reference: **[docs.cheddaboards.com](https://docs.cheddaboards.com)**.
 
-This asset connects to CheddaBoards, a free online leaderboard service. A free account is required for an API key. No fees, no usage costs.
+---
 
-## Support
+## Demo — CheddaClick
 
-<<<<<<< HEAD
-info@cheddaboards.com · https://cheddaboards.com
-=======
 A complete working example lives in [`Demo/`](Demo/): **CheddaClick**, a
 30-second cheese-clicking game in one script. It shows the full integration —
 anonymous login, guest flow, play sessions, score submit, leaderboard render,
@@ -380,4 +377,3 @@ The SDK is HTTP-only — it works identically everywhere Unity runs:
 ## License
 
 MIT — see [LICENSE](LICENSE)
->>>>>>> 8a55c79 (update status link on readme)
