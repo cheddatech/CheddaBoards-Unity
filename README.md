@@ -19,7 +19,7 @@ Drop-in C# SDK for [CheddaBoards](https://cheddaboards.com) — permanent, serve
 
 ## What's new
 
-- **2.2.7** — Three fixes on the anonymous-player paths: submits no longer silently overwrite a player's saved nickname with a generated one; batch achievement sync reports the real synced ids instead of a false "0 synced"; and `GetAchievements()` works again (it now reads from the profile — the standalone route it called never existed). Unnamed players stay unnamed — render them as "Guest".
+- **2.2.7** — Three fixes on the anonymous-player paths: submits no longer silently overwrite a player's saved nickname with a generated one; batch achievement sync reports the real synced ids instead of a false "0 synced"; and `GetAchievements()` works again (it now reads from the profile — the standalone route it called never existed). Until a new player's profile loads, `GetNickname()` returns "", so show "Guest"; the server assigns a name (e.g. `Player_1248`) on their first submit.
 - **2.2.6** — Board reads now come **straight from the CheddaBoards canister** for faster loads, with automatic proxy fallback (see 2.2.5). Fixed the `GetAlltimeLeaderboard()` / `GetWeeklyLeaderboard()` helpers, which queried the wrong board IDs. `GetLeaderboard()` default limit is now 100.
 - **2.2.5** — Direct canister reads: `GetScoreboard()` and the Weekly / Daily / Alltime / Monthly helpers read directly from the Internet Computer, keyless and CORS-simple, falling back to the proxy automatically if the direct path can't get through. Same events, no code changes.
 - **2.2.3** — Sessions persist across restarts (device-code sign-in is now a one-time flow), plus a new `OnSessionExpired` event. Nickname validation matches the canonical rule (3–16 chars, letters/numbers/underscores).
@@ -46,11 +46,13 @@ Full history is in the header comment of `CheddaBoards.cs`.
 
 ### 1. Add to your project
 
-Copy `CheddaBoards.cs` into your Unity project (e.g. `Assets/Scripts/CheddaBoards.cs`).
+Requires **Unity 2022.3 LTS or newer**. Copy `CheddaBoards.cs` into your Unity project (e.g. `Assets/Scripts/CheddaBoards.cs`). The SDK lives in the `CheddaTech` namespace, so add `using CheddaTech;` at the top of any script that uses it.
 
 ### 2. Configure
 
 ```csharp
+using CheddaTech;
+
 var cb = CheddaBoards.Instance; // Auto-creates singleton GameObject
 cb.SetApiKey("your-api-key");
 cb.SetGameId("your-game-id");
@@ -95,6 +97,7 @@ nickname changes.
 
 To run it: open `Demo/CheddaClick.unity`, put your API key and game ID on the
 `CheddaClickGame` component (or in `CheddaBoards.cs`), and press Play.
+The demo UI uses TextMeshPro; if your project doesn't have it yet, Unity will prompt you to import TMP Essentials when you open the scene (the SDK itself has no dependencies).
 `CheddaClickGame.cs` is commented as a reference — the event wiring and the
 anonymous-player ordering (profile before play, achievements after submit) are
 the patterns to copy into your own game.
@@ -117,8 +120,10 @@ cb.LoginAnonymous();
 Log in **without** a name unless the player has just chosen one: any name you
 pass becomes the current nickname and is written to the server on the next
 submit, overwriting whatever the player had saved. Leave it empty and returning
-players keep their stored name; brand-new players stay unnamed ("Guest") until
-they pick one via `ChangeNickname()`.
+players keep their stored name; brand-new players get a server-assigned name
+(e.g. `Player_1248`) when their first submit creates their profile. Until the
+profile loads, `GetNickname()` returns `""`, so show "Guest" locally. Players can
+pick their own name any time with `ChangeNickname()`.
 
 > **Nickname rules (server-enforced):** 3–16 characters, letters, numbers, and
 > underscores. Anything else is rejected on nickname changes; names supplied at
@@ -156,9 +161,10 @@ Full device-code flow, including QR rendering: [Device code login](https://docs.
 Upgrade an anonymous player to a verified account without losing scores or achievements. Scores and streaks merge by maximum, achievements are deduplicated, and play counts are summed — linking the same account from a second device merges cleanly.
 
 ```csharp
-cb.OnAccountUpgraded += (oldProfile, newProfile) =>
+cb.OnAccountUpgraded += (profile, migration) =>
 {
-    Debug.Log("Account upgraded! Scores preserved.");
+    // profile: the merged account's profile; migration: migratedGames / migratedScoreboards counts
+    Debug.Log($"Account upgraded! {migration["migratedScoreboards"]} boards merged.");
 };
 
 cb.MigrateAnonymousToCurrent(anonymousDeviceId);
@@ -306,6 +312,10 @@ Caps, time validation, and the suspicion log: [Anti-cheat](https://docs.cheddabo
 | `OnScoreSubmitted` | `score, streak` | Score saved (fan-out) |
 | `OnScoreSubmittedToBoard` | `boardId, score, streak` | Targeted score saved to one board |
 | `OnScoreError` | `error` | Score submission failed |
+| `OnScoreboardError` | `error` | Scoreboard read failed |
+| `OnPlaySessionError` | `error` | Play session couldn't start (score still submits unless time validation is on) |
+| `OnNicknameError` | `error` | Nickname rejected (invalid — don't retry the same value) |
+| `OnDeviceCodeError` | `error` | Device code sign-in failed |
 | `OnScoreboardLoaded` | `id, config, entries` | Scoreboard data received |
 | `OnScoreboardRankLoaded` | `id, rank, score, streak, total` | Player rank received |
 | `OnAchievementUnlocked` | `achievementId` | Achievement unlocked |
@@ -314,7 +324,7 @@ Caps, time validation, and the suspicion log: [Anti-cheat](https://docs.cheddabo
 | `OnDeviceCodeReceived` | `code, url, qrDataUrl` | Device code ready to display |
 | `OnDeviceCodeApproved` | `nickname` | Social login completed |
 | `OnDeviceCodeExpired` | — | Code timed out |
-| `OnAccountUpgraded` | `oldProfile, newProfile` | Migration completed |
+| `OnAccountUpgraded` | `profile, migration` | Migration completed (`migration` carries `migratedGames` / `migratedScoreboards`) |
 | `OnProfileLoaded` | `nickname, score, streak, achievements, playCount` | Profile data received |
 | `OnNicknameChanged` | `nickname` | Nickname updated |
 | `OnArchivesListLoaded` | `scoreboardId, archives` | Archive list received |
